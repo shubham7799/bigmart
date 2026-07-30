@@ -3,11 +3,17 @@ import logging
 from fastapi import BackgroundTasks, FastAPI, Request
 
 from app.agent.runtime import run_agent
+from app.db.session import init_db
 from app.telegram import send_message
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="BigMart API", version="1.0.0")
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    await init_db()
 
 
 @app.get("/")
