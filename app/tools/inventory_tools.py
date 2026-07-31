@@ -99,6 +99,26 @@ async def receive_stock(product_name: str, quantity: float, cost_price: float | 
 
 
 @tool
+async def update_gst(product_name: str, gst_slab: float) -> str:
+    """Update the GST slab (percent) for an existing product. If product_name
+    matches multiple products, returns the list of matches instead of guessing."""
+    async with async_session_maker() as session:
+        matches = await _find_products(session, product_name)
+        if not matches:
+            return f"No product found matching '{product_name}'."
+        if len(matches) > 1:
+            return _ambiguous_message(matches)
+
+        product = matches[0]
+        old_slab = product.gst_slab
+        product.gst_slab = gst_slab
+
+        await session.commit()
+        await session.refresh(product)
+        return f"Updated GST slab for '{product.name}' from {old_slab}% to {product.gst_slab}%."
+
+
+@tool
 async def get_stock(product_name: str) -> str:
     """Look up the current quantity_on_hand for a product by name, straight from the
     database. If product_name matches multiple products, returns the list of matches
@@ -114,4 +134,4 @@ async def get_stock(product_name: str) -> str:
         return f"'{product.name}' (id={product.id}): quantity_on_hand={product.quantity_on_hand} {product.unit}."
 
 
-ALL_TOOLS = [add_product, receive_stock, get_stock]
+ALL_TOOLS = [add_product, receive_stock, get_stock, update_gst]

@@ -28,7 +28,7 @@ def health_check() -> dict[str, str]:
 
 async def _reply_to_message(chat_id: int, text: str) -> None:
     try:
-        reply = await run_agent(text)
+        reply = await run_agent(text, thread_id=str(chat_id))
         await send_message(chat_id, reply)
     except Exception:
         logger.exception("Failed to handle message for chat %s", chat_id)
