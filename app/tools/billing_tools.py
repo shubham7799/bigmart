@@ -7,6 +7,7 @@ from app.db.models import Bill, BillItem, Product, StockTxn
 from app.db.session import async_session_maker
 from app.services.gst import round_line, split_gst
 from app.tools.inventory_tools import _ambiguous_message, _find_products
+from app.tools.khata_tools import add_credit
 
 
 async def _get_draft_bill(session, bill_id: int) -> tuple[Bill | None, str | None]:
@@ -189,10 +190,13 @@ async def edit_item(bill_id: int, product_name: str, new_quantity: float) -> str
 
 
 @tool
-async def finalize_bill(bill_id: int) -> str:
+async def finalize_bill(bill_id: int, on_credit: bool = False) -> str:
     """Finalize a draft bill: locks it (status=finalized), decrements stock for
     every line item via a StockTxn (reason='sold'), and returns the final receipt
-    totals. Rejects bills that are already finalized or have no items."""
+    totals. Rejects bills that are already finalized or have no items. If
+    on_credit is true, the bill's grand_total is added to the customer's khata
+    (credit ledger) instead of being treated as paid in full — requires the bill
+    to have a customer_name set."""
     # NOTE: this whole function runs in a single DB transaction (one session, one
     # commit at the end). It relies on SELECT ... FOR UPDATE row locks, which
     # Postgres honors as real per-row locks — a second transaction trying to lock
@@ -220,6 +224,12 @@ async def finalize_bill(bill_id: int) -> str:
         items = (await session.execute(stmt)).scalars().all()
         if not items:
             return f"Bill {bill_id} has no items — add items before finalizing."
+
+        if on_credit and not bill.customer_name:
+            return (
+                f"Cannot finalize bill {bill_id} on credit — it has no customer_name "
+                "set, so there's no one to add the khata entry for."
+            )
 
         # Lock every product row this bill touches, in a fixed ascending-id order.
         # A consistent lock order across all concurrent finalize_bill calls (even
@@ -258,12 +268,20 @@ async def finalize_bill(bill_id: int) -> str:
         bill.status = "finalized"
         bill.finalized_at = datetime.now(timezone.utc)
 
+        if on_credit:
+            # Same session/transaction as everything above — this commit is the
+            # only commit in the whole function, so a duplicate finalize_bill
+            # call (blocked by the Bill row lock until this one commits) can
+            # never see status=="draft" again and can never double-add to khata.
+            await add_credit(session, bill.customer_name, float(bill.grand_total), related_bill_id=bill.id)
+
         await session.commit()
         await session.refresh(bill)
+        credit_note = " (added to khata as credit)" if on_credit else ""
         return (
             f"Bill {bill.id} finalized for {bill.customer_name or 'a walk-in customer'}. "
             f"Subtotal={bill.subtotal}, CGST={bill.cgst_total}, SGST={bill.sgst_total}, "
-            f"Grand Total={bill.grand_total}."
+            f"Grand Total={bill.grand_total}{credit_note}."
         )
 
 

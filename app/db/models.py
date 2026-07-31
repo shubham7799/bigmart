@@ -75,6 +75,34 @@ class BillItem(Base):
     product: Mapped["Product"] = relationship()
 
 
+class Customer(Base):
+    """Customer identity is matched by exact (case-insensitive) name only, for
+    now — no phone-based dedup or fuzzy matching. Two different real people who
+    happen to share a name will collide onto the same khata ledger; a real fix
+    needs an actual customer lookup/dedup flow, which is out of scope here."""
+
+    __tablename__ = "customers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class KhataEntry(Base):
+    __tablename__ = "khata_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    entry_type: Mapped[str] = mapped_column(String(16))  # "credit" or "payment"
+    amount: Mapped[float] = mapped_column(Numeric(12, 2))
+    related_bill_id: Mapped[int | None] = mapped_column(ForeignKey("bills.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    customer: Mapped["Customer"] = relationship()
+
+
 class ProcessedUpdate(Base):
     """Records Telegram update_ids we've already handled, so a duplicate webhook
     delivery of the same update can be detected and skipped *before* the agent
