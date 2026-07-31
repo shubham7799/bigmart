@@ -75,6 +75,22 @@ class BillItem(Base):
     product: Mapped["Product"] = relationship()
 
 
+class ProcessedUpdate(Base):
+    """Records Telegram update_ids we've already handled, so a duplicate webhook
+    delivery of the same update can be detected and skipped *before* the agent
+    (and any tool side effects) runs. The primary key doubles as the uniqueness
+    constraint: a single INSERT that violates it is how two near-simultaneous
+    deliveries of the same update are kept from both passing the check — see
+    app/telegram/webhook.py."""
+
+    __tablename__ = "processed_updates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)  # Telegram update_id
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
 class Conversation(Base):
     """Per-thread chat history, so the agent remembers context (e.g. the active
     bill_id) across turns and across server restarts — replaces what a langgraph

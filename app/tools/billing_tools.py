@@ -193,11 +193,27 @@ async def finalize_bill(bill_id: int) -> str:
     """Finalize a draft bill: locks it (status=finalized), decrements stock for
     every line item via a StockTxn (reason='sold'), and returns the final receipt
     totals. Rejects bills that are already finalized or have no items."""
+    # NOTE: this whole function runs in a single DB transaction (one session, one
+    # commit at the end). It relies on SELECT ... FOR UPDATE row locks, which
+    # Postgres honors as real per-row locks — a second transaction trying to lock
+    # an already-locked row blocks until the first commits/rolls back, then sees
+    # the updated row. SQLite does NOT do per-row locking: it locks the whole
+    # database file on write, so FOR UPDATE there doesn't buy the same
+    # fine-grained concurrency guarantee (two writers just serialize on the whole
+    # DB rather than only on the rows they actually touch, and some SQLite
+    # drivers ignore FOR UPDATE syntax entirely). This code assumes Postgres —
+    # settings.database_url should point at Postgres in any environment where
+    # concurrent finalize_bill calls are expected, not at a SQLite file.
     async with async_session_maker() as session:
-        bill = await session.get(Bill, bill_id)
+        bill = (
+            await session.execute(select(Bill).where(Bill.id == bill_id).with_for_update())
+        ).scalar_one_or_none()
         if bill is None:
             return f"No bill found with id={bill_id}."
         if bill.status == "finalized":
+            # Lost the race to another finalize_bill call for this same bill_id —
+            # it already committed and released the lock by the time we acquired
+            # it, so we just observe the final state and no-op.
             return f"Bill {bill_id} is already finalized."
 
         stmt = select(BillItem).where(BillItem.bill_id == bill_id)
@@ -205,7 +221,24 @@ async def finalize_bill(bill_id: int) -> str:
         if not items:
             return f"Bill {bill_id} has no items — add items before finalizing."
 
-        products = {item.product_id: await session.get(Product, item.product_id) for item in items}
+        # Lock every product row this bill touches, in a fixed ascending-id order.
+        # A consistent lock order across all concurrent finalize_bill calls (even
+        # ones for different bills) prevents lock-ordering deadlocks when two
+        # bills share products.
+        product_ids = sorted({item.product_id for item in items})
+        products = {}
+        for product_id in product_ids:
+            product = (
+                await session.execute(
+                    select(Product).where(Product.id == product_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            products[product_id] = product
+
+        # Re-check stock now that we hold the locks: another bill may have been
+        # finalized against the same product(s) between this bill's add_item
+        # calls and this finalize call, so the Phase 2 oversell check at add_item
+        # time is not sufficient on its own.
         for item in items:
             product = products[item.product_id]
             if float(item.quantity) > float(product.quantity_on_hand):
