@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 from langchain_core.messages import (
@@ -15,11 +16,18 @@ from app.config import settings
 from app.db.models import Conversation
 from app.db.session import async_session_maker
 from app.tools.billing_tools import ALL_TOOLS as BILLING_TOOLS
+from app.tools.document_tools import ALL_TOOLS as DOCUMENT_TOOLS
 from app.tools.inventory_tools import ALL_TOOLS as INVENTORY_TOOLS
 from app.tools.khata_tools import ALL_TOOLS as KHATA_TOOLS
 
-ALL_TOOLS = [*INVENTORY_TOOLS, *BILLING_TOOLS, *KHATA_TOOLS]
+ALL_TOOLS = [*INVENTORY_TOOLS, *BILLING_TOOLS, *KHATA_TOOLS, *DOCUMENT_TOOLS]
 TOOLS_BY_NAME = {t.name: t for t in ALL_TOOLS}
+
+
+@dataclass
+class AgentReply:
+    text: str
+    files: list[str] = field(default_factory=list)
 
 SYSTEM_PROMPT = (
     "You are BigMart's inventory and billing assistant. You have tools to create "
@@ -38,7 +46,11 @@ SYSTEM_PROMPT = (
     "new_quantity=N). If the user wants to finalize a bill 'on credit' or 'on "
     "khata' or says the customer will pay later, call finalize_bill with "
     "on_credit=True instead of using khata_add separately — finalize_bill "
-    "already adds the credit entry for you in that case."
+    "already adds the credit entry for you in that case. Use get_invoice to "
+    "generate and send a PDF tax invoice for a finalized bill, and "
+    "get_sales_analysis to generate and send a sales/stock/GST analysis slide "
+    "deck for a date range — both are delivered to the user as a file "
+    "automatically, you don't need to do anything extra to send them."
 )
 
 MAX_TOOL_ITERATIONS = 8
@@ -88,20 +100,35 @@ def _extract_text(content: str | list | dict) -> str:
     return str(content)
 
 
-async def _call_tool(name: str, args: dict) -> str:
+async def _call_tool(name: str, args: dict) -> tuple[str, str | None]:
+    """Returns (text_for_model, file_path). Most tools just return a plain
+    string, which passes straight through as text_for_model with file_path=None.
+    Document-producing tools (get_invoice, get_sales_analysis) instead return a
+    {"text": ..., "file_path": ...} dict — that shape is how a tool signals "this
+    turn produced a file" back out of the executor. The file_path is pulled out
+    here and never becomes part of the ToolMessage the model sees (so the model's
+    context never contains a raw filesystem path, and the path never gets
+    persisted into the Conversation history — it's a local temp file, meaningless
+    after this turn/process). run_agent collects these into AgentReply.files,
+    which the webhook layer uses to call send_document."""
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
-        return f"Unknown tool: {name}"
+        return f"Unknown tool: {name}", None
     try:
-        return str(await tool.ainvoke(args))
+        result = await tool.ainvoke(args)
     except Exception as exc:  # noqa: BLE001 - surface the failure back to the model
-        return f"Tool '{name}' raised an error: {exc}"
+        return f"Tool '{name}' raised an error: {exc}", None
+
+    if isinstance(result, dict) and "file_path" in result:
+        return result.get("text", f"Generated file: {result['file_path']}"), result["file_path"]
+    return str(result), None
 
 
-async def run_agent(message: str, thread_id: str = "default") -> str:
+async def run_agent(message: str, thread_id: str = "default") -> AgentReply:
     history = await _load_history(thread_id)
     messages: list[BaseMessage] = [SystemMessage(content=SYSTEM_PROMPT), *history, HumanMessage(content=message)]
 
+    collected_files: list[str] = []
     llm = get_llm()
     for _ in range(MAX_TOOL_ITERATIONS):
         ai_message: AIMessage = await llm.ainvoke(messages)
@@ -112,10 +139,12 @@ async def run_agent(message: str, thread_id: str = "default") -> str:
             break
 
         for call in tool_calls:
-            result = await _call_tool(call["name"], call["args"])
-            messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
+            text_result, file_path = await _call_tool(call["name"], call["args"])
+            messages.append(ToolMessage(content=text_result, tool_call_id=call["id"]))
+            if file_path:
+                collected_files.append(file_path)
     else:
         messages.append(AIMessage(content="I couldn't finish that after several tool calls — could you rephrase?"))
 
     await _save_history(thread_id, messages[1:])  # drop the leading SystemMessage
-    return _extract_text(messages[-1].content)
+    return AgentReply(text=_extract_text(messages[-1].content), files=collected_files)

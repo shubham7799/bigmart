@@ -1,11 +1,12 @@
 import logging
+import os
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.agent.runtime import run_agent
 from app.db.models import ProcessedUpdate
 from app.db.session import async_session_maker
-from app.telegram.client import send_message
+from app.telegram.client import send_document, send_message
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,16 @@ async def process_update(update: dict) -> None:
     chat_id = message["chat"]["id"]
     try:
         reply = await run_agent(message["text"], thread_id=str(chat_id))
-        await send_message(chat_id, reply)
+        if reply.text:
+            await send_message(chat_id, reply.text)
+        for file_path in reply.files:
+            try:
+                await send_document(chat_id, file_path)
+            finally:
+                # Generated PDFs/PPTX are one-shot temp files (see
+                # app/services/invoice_pdf.py, analysis_pptx.py) — clean up once
+                # sent regardless of whether the send itself succeeded.
+                if os.path.exists(file_path):
+                    os.remove(file_path)
     except Exception:
         logger.exception("Failed to handle message for chat %s", chat_id)

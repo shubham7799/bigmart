@@ -7,3 +7,6 @@ pydantic-settings>=2.4.0
 python-dotenv>=1.0.0
 sqlalchemy>=2.0.30
 asyncpg>=0.29.0
+reportlab>=4.0.0
+python-pptx>=1.0.0
+matplotlib>=3.8.0
