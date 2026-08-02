@@ -58,4 +58,14 @@ async def process_update(update: dict) -> None:
                 if os.path.exists(file_path):
                     os.remove(file_path)
     except Exception:
+        # Covers agent/LLM failures (e.g. Gemini API errors), unexpected tool
+        # exceptions that escaped _call_tool's own try/except, and send_message/
+        # send_document failures. The full exception goes to the server log for
+        # debugging; the user gets a plain, honest heads-up instead of silence —
+        # a background task's exception has nowhere else to surface, so without
+        # this the chat would just go quiet with no indication anything broke.
         logger.exception("Failed to handle message for chat %s", chat_id)
+        try:
+            await send_message(chat_id, "Something went wrong on my end — please try again.")
+        except Exception:
+            logger.exception("Also failed to notify chat %s about the earlier error", chat_id)

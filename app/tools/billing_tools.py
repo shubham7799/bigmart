@@ -70,11 +70,15 @@ async def start_bill(customer_name: str | None = None) -> str:
 
 @tool
 async def add_item(bill_id: int, product_name: str, quantity: float) -> str:
-    """Add `quantity` units of a product to a draft bill. If the product already has
-    a line on this bill, the quantity is ADDED to the existing line (cumulative) —
-    use edit_item instead to set a line's quantity to an absolute value. Rejects the
-    request (no changes made) if the resulting line quantity would exceed what's
-    currently in stock — this oversell guard is enforced here, not negotiable."""
+    """Add `quantity` MORE units of a product to a draft bill — use for phrases
+    like "add 2 Maggi" or "also give me 3 sugar". If the product already has a
+    line on this bill, `quantity` is ADDED on top of what's already there
+    (cumulative: add_item(qty=2) then add_item(qty=3) leaves the line at 5).
+    Do NOT use this when the user wants to SET a line to an absolute total
+    (e.g. "make it 5", "remove Maggi, add 6 instead") — that's edit_item, not
+    a second add_item call. Rejects the request (no changes made) if the
+    resulting line quantity would exceed what's currently in stock — this
+    oversell guard is enforced here, not negotiable."""
     if quantity <= 0:
         return "quantity must be positive."
     async with async_session_maker() as session:
@@ -134,10 +138,14 @@ async def add_item(bill_id: int, product_name: str, quantity: float) -> str:
 
 @tool
 async def edit_item(bill_id: int, product_name: str, new_quantity: float) -> str:
-    """Set an existing bill line's quantity to an absolute value (not cumulative) —
-    use this for 'change the quantity of X to N' or 'remove X and add N instead'.
-    Set new_quantity to 0 to remove the line entirely. Rejects (no changes made) if
-    new_quantity exceeds what's currently in stock."""
+    """Set an existing bill line's quantity to an ABSOLUTE total — NOT cumulative,
+    unlike add_item. Use this for "change the quantity of X to N", "make it N",
+    or "remove X and add N instead" (all mean: the line should now read N, not
+    N-more-than-before). The product must already have a line on this bill — if
+    it doesn't, this fails and tells you to call add_item instead (don't call
+    edit_item to create a new line). Set new_quantity to 0 to remove the line
+    entirely. Rejects (no changes made) if new_quantity exceeds what's currently
+    in stock."""
     if new_quantity < 0:
         return "new_quantity cannot be negative."
     async with async_session_maker() as session:

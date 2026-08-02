@@ -15,8 +15,8 @@ from app.services.invoice_pdf import generate_invoice_pdf
 @tool
 async def get_invoice(bill_id: int) -> dict:
     """Generate a PDF tax invoice for a finalized bill and send it to the user.
-    Only works on finalized bills — raises/reports an error for a draft bill or
-    a bill_id that doesn't exist."""
+    Only works on finalized bills — returns an error message (no file sent) for
+    a draft bill or an unknown bill_id."""
     try:
         path = await generate_invoice_pdf(bill_id)
     except ValueError as exc:
@@ -27,7 +27,9 @@ async def get_invoice(bill_id: int) -> dict:
 @tool
 async def get_sales_analysis(date_from: str, date_to: str) -> dict:
     """Generate a sales/stock/GST analysis slide deck (PPTX) covering
-    [date_from, date_to] inclusive (both "YYYY-MM-DD") and send it to the user."""
+    [date_from, date_to] inclusive (both "YYYY-MM-DD") and send it to the user.
+    Returns an error message (no file sent) for a malformed or inverted date
+    range (date_from after date_to)."""
     try:
         path = await generate_analysis_pptx(date_from, date_to)
     except ValueError as exc:
