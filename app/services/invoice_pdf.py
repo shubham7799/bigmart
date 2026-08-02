@@ -19,17 +19,29 @@ from sqlalchemy.orm import selectinload
 
 from app.db.models import Bill, BillItem
 from app.db.session import async_session_maker
-
-# TODO (Phase 6): no Preference table exists yet for shop identity (name, GSTIN,
-# address, etc). Once one does, load real values from it here instead of these
-# placeholders. Keeping the placeholders obvious/labeled rather than inventing
-# plausible-looking fake shop details.
-SHOP_NAME = "[SHOP NAME — placeholder, see Preference table Phase 6]"
-SHOP_GSTIN = "[SHOP GSTIN — placeholder, see Preference table Phase 6]"
-SHOP_ADDRESS = "[SHOP ADDRESS — placeholder, see Preference table Phase 6]"
+from app.tools.preference_tools import get_preference_value
 
 
-async def _load_bill(bill_id: int) -> tuple[Bill, list[BillItem]]:
+def _placeholder(label: str, example: str) -> str:
+    return f"[{label} not set — say \"{example}\" to set it]"
+
+
+async def _shop_header(session) -> tuple[str, str, str]:
+    """Shop identity now lives in the Preference table (Phase 6) instead of the
+    Phase 5 hardcoded placeholders. Falls back to a clearly-labeled prompt
+    telling the owner how to set it, rather than crashing or inventing a
+    plausible-looking fake shop name/GSTIN."""
+    name = await get_preference_value(session, "shop_name")
+    gstin = await get_preference_value(session, "gstin")
+    address = await get_preference_value(session, "shop_address")
+    return (
+        name or _placeholder("Shop name", "my shop is called X"),
+        gstin or _placeholder("GSTIN", "my shop's GSTIN is X"),
+        address or _placeholder("Shop address", "my shop address is X"),
+    )
+
+
+async def _load_bill(bill_id: int) -> tuple[Bill, list[BillItem], tuple[str, str, str]]:
     async with async_session_maker() as session:
         bill = await session.get(Bill, bill_id)
         if bill is None:
@@ -46,13 +58,14 @@ async def _load_bill(bill_id: int) -> tuple[Bill, list[BillItem]]:
             .order_by(BillItem.id)
         )
         items = (await session.execute(stmt)).scalars().all()
-        return bill, list(items)
+        shop_header = await _shop_header(session)
+        return bill, list(items), shop_header
 
 
 async def generate_invoice_pdf(bill_id: int) -> str:
     """Write a tax-invoice PDF for a finalized bill to a temp path and return
     that path. Raises ValueError for a missing or non-finalized bill."""
-    bill, items = await _load_bill(bill_id)
+    bill, items, (shop_name, shop_gstin, shop_address) = await _load_bill(bill_id)
 
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("InvoiceTitle", parent=styles["Title"], fontSize=18)
@@ -64,9 +77,9 @@ async def generate_invoice_pdf(bill_id: int) -> str:
     doc = SimpleDocTemplate(path, pagesize=A4, topMargin=20 * mm, bottomMargin=20 * mm)
     elements = []
 
-    elements.append(Paragraph(SHOP_NAME, title_style))
-    elements.append(Paragraph(f"GSTIN: {SHOP_GSTIN}", small_style))
-    elements.append(Paragraph(SHOP_ADDRESS, small_style))
+    elements.append(Paragraph(shop_name, title_style))
+    elements.append(Paragraph(f"GSTIN: {shop_gstin}", small_style))
+    elements.append(Paragraph(shop_address, small_style))
     elements.append(Spacer(1, 10 * mm))
 
     elements.append(Paragraph("TAX INVOICE", styles["Heading2"]))

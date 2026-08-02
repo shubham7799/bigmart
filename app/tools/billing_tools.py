@@ -8,6 +8,7 @@ from app.db.session import async_session_maker
 from app.services.gst import round_line, split_gst
 from app.tools.inventory_tools import _ambiguous_message, _find_products
 from app.tools.khata_tools import add_credit
+from app.tools.preference_tools import get_preference_value
 
 
 async def _get_draft_bill(session, bill_id: int) -> tuple[Bill | None, str | None]:
@@ -190,13 +191,14 @@ async def edit_item(bill_id: int, product_name: str, new_quantity: float) -> str
 
 
 @tool
-async def finalize_bill(bill_id: int, on_credit: bool = False) -> str:
+async def finalize_bill(bill_id: int, on_credit: bool = False, payment_method: str | None = None) -> str:
     """Finalize a draft bill: locks it (status=finalized), decrements stock for
     every line item via a StockTxn (reason='sold'), and returns the final receipt
     totals. Rejects bills that are already finalized or have no items. If
     on_credit is true, the bill's grand_total is added to the customer's khata
     (credit ledger) instead of being treated as paid in full — requires the bill
-    to have a customer_name set."""
+    to have a customer_name set. If payment_method isn't given, falls back to
+    the shop's "default_payment_method" preference if one is set."""
     # NOTE: this whole function runs in a single DB transaction (one session, one
     # commit at the end). It relies on SELECT ... FOR UPDATE row locks, which
     # Postgres honors as real per-row locks — a second transaction trying to lock
@@ -268,6 +270,17 @@ async def finalize_bill(bill_id: int, on_credit: bool = False) -> str:
         bill.status = "finalized"
         bill.finalized_at = datetime.now(timezone.utc)
 
+        # --- preference hook (Phase 6) ---
+        # If the caller didn't pin down a payment method for this specific bill,
+        # fall back to the shop's standing "default_payment_method" preference
+        # (still fine to end up None if that's never been set either — we never
+        # invent a value). Extend here for finer-grained fallbacks later, e.g. a
+        # per-customer override via a "default_payment_method:<customer_name>"
+        # preference key, checked before the global one.
+        if payment_method is None:
+            payment_method = await get_preference_value(session, "default_payment_method")
+        bill.payment_method = payment_method
+
         if on_credit:
             # Same session/transaction as everything above — this commit is the
             # only commit in the whole function, so a duplicate finalize_bill
@@ -278,10 +291,11 @@ async def finalize_bill(bill_id: int, on_credit: bool = False) -> str:
         await session.commit()
         await session.refresh(bill)
         credit_note = " (added to khata as credit)" if on_credit else ""
+        payment_note = f" Payment method: {bill.payment_method}." if bill.payment_method else ""
         return (
             f"Bill {bill.id} finalized for {bill.customer_name or 'a walk-in customer'}. "
             f"Subtotal={bill.subtotal}, CGST={bill.cgst_total}, SGST={bill.sgst_total}, "
-            f"Grand Total={bill.grand_total}{credit_note}."
+            f"Grand Total={bill.grand_total}{credit_note}.{payment_note}"
         )
 
 

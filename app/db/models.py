@@ -53,6 +53,7 @@ class Bill(Base):
     cgst_total: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     sgst_total: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     grand_total: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
+    payment_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     items: Mapped[list["BillItem"]] = relationship(back_populates="bill")
 
@@ -101,6 +102,27 @@ class KhataEntry(Base):
     )
 
     customer: Mapped["Customer"] = relationship()
+
+
+class Preference(Base):
+    """Standing shop-level settings (shop name, GSTIN, default payment method,
+    preferred brand per category, etc). Deliberately a flexible key/value shape
+    rather than fixed columns, since the set of preferences will keep growing and
+    a fixed-column table would need a migration for every new one. Keyed
+    globally — this bot serves a single shop's owner, so there's no per-chat or
+    per-Telegram-user scoping here (contrast with Conversation, which IS scoped
+    per chat thread — see runtime.py)."""
+
+    __tablename__ = "preferences"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    value: Mapped[str] = mapped_column(String(1024))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class ProcessedUpdate(Base):

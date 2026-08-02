@@ -19,8 +19,9 @@ from app.tools.billing_tools import ALL_TOOLS as BILLING_TOOLS
 from app.tools.document_tools import ALL_TOOLS as DOCUMENT_TOOLS
 from app.tools.inventory_tools import ALL_TOOLS as INVENTORY_TOOLS
 from app.tools.khata_tools import ALL_TOOLS as KHATA_TOOLS
+from app.tools.preference_tools import ALL_TOOLS as PREFERENCE_TOOLS
 
-ALL_TOOLS = [*INVENTORY_TOOLS, *BILLING_TOOLS, *KHATA_TOOLS, *DOCUMENT_TOOLS]
+ALL_TOOLS = [*INVENTORY_TOOLS, *BILLING_TOOLS, *KHATA_TOOLS, *DOCUMENT_TOOLS, *PREFERENCE_TOOLS]
 TOOLS_BY_NAME = {t.name: t for t in ALL_TOOLS}
 
 
@@ -50,7 +51,16 @@ SYSTEM_PROMPT = (
     "generate and send a PDF tax invoice for a finalized bill, and "
     "get_sales_analysis to generate and send a sales/stock/GST analysis slide "
     "deck for a date range — both are delivered to the user as a file "
-    "automatically, you don't need to do anything extra to send them."
+    "automatically, you don't need to do anything extra to send them. "
+    "You also have standing shop preferences (set_preference/get_preference/"
+    "list_preferences) that persist across restarts and across every chat, not "
+    "just this conversation — things like shop_name, gstin, shop_address, and "
+    "default_payment_method. Check get_preference proactively instead of "
+    "asking the owner to repeat shop details you might already know (e.g. "
+    "before or while generating an invoice). If the owner tells you a shop "
+    "detail or a standing preference (\"my shop is called X\", \"my GSTIN is "
+    "Y\", \"always default to cash\"), call set_preference to remember it for "
+    "next time rather than only using it for the current reply."
 )
 
 MAX_TOOL_ITERATIONS = 8
