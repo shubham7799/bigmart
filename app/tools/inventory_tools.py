@@ -1,12 +1,14 @@
-from langchain_core.tools import tool
+from typing import Annotated
+
+from langchain_core.tools import InjectedToolArg, tool
 from sqlalchemy import select
 
 from app.db.models import Product, StockTxn
 from app.db.session import async_session_maker
 
 
-async def _find_products(session, name: str) -> list[Product]:
-    stmt = select(Product).where(Product.name.ilike(f"%{name}%"))
+async def _find_products(session, shop_id: str, name: str) -> list[Product]:
+    stmt = select(Product).where(Product.shop_id == shop_id, Product.name.ilike(f"%{name}%"))
     result = await session.execute(stmt)
     return list(result.scalars().all())
 
@@ -27,11 +29,12 @@ async def add_product(
     hsn_code: str,
     cost_price: float,
     sale_price: float,
+    shop_id: Annotated[str, InjectedToolArg],
 ) -> str:
     """Create a new product in the inventory. Use only when the user wants to define
     a brand-new product with full details, not just add stock to an existing one."""
     async with async_session_maker() as session:
-        existing = await _find_products(session, name)
+        existing = await _find_products(session, shop_id, name)
         exact = [p for p in existing if p.name.lower() == name.lower()]
         if exact:
             return (
@@ -40,6 +43,7 @@ async def add_product(
             )
 
         product = Product(
+            shop_id=shop_id,
             name=name,
             unit=unit,
             gst_slab=gst_slab,
@@ -58,14 +62,19 @@ async def add_product(
 
 
 @tool
-async def receive_stock(product_name: str, quantity: float, cost_price: float | None = None) -> str:
+async def receive_stock(
+    product_name: str,
+    quantity: float,
+    shop_id: Annotated[str, InjectedToolArg],
+    cost_price: float | None = None,
+) -> str:
     """Record stock received for a product, increasing its quantity_on_hand and
     logging a StockTxn. If the product doesn't exist yet, it is created automatically
     using product_name and cost_price (unit defaults to 'pc'; call add_product
     afterward to set gst_slab/hsn_code/sale_price precisely). If product_name matches
     multiple existing products, returns the list of matches instead of guessing."""
     async with async_session_maker() as session:
-        matches = await _find_products(session, product_name)
+        matches = await _find_products(session, shop_id, product_name)
         if len(matches) > 1:
             return _ambiguous_message(matches)
 
@@ -75,6 +84,7 @@ async def receive_stock(product_name: str, quantity: float, cost_price: float | 
                 product.cost_price = cost_price
         else:
             product = Product(
+                shop_id=shop_id,
                 name=product_name,
                 unit="pc",
                 gst_slab=0,
@@ -99,11 +109,13 @@ async def receive_stock(product_name: str, quantity: float, cost_price: float | 
 
 
 @tool
-async def update_gst(product_name: str, gst_slab: float) -> str:
+async def update_gst(
+    product_name: str, gst_slab: float, shop_id: Annotated[str, InjectedToolArg]
+) -> str:
     """Update the GST slab (percent) for an existing product. If product_name
     matches multiple products, returns the list of matches instead of guessing."""
     async with async_session_maker() as session:
-        matches = await _find_products(session, product_name)
+        matches = await _find_products(session, shop_id, product_name)
         if not matches:
             return f"No product found matching '{product_name}'."
         if len(matches) > 1:
@@ -119,12 +131,12 @@ async def update_gst(product_name: str, gst_slab: float) -> str:
 
 
 @tool
-async def get_stock(product_name: str) -> str:
+async def get_stock(product_name: str, shop_id: Annotated[str, InjectedToolArg]) -> str:
     """Look up the current quantity_on_hand for a product by name, straight from the
     database. If product_name matches multiple products, returns the list of matches
     instead of guessing so you can ask the user to clarify."""
     async with async_session_maker() as session:
-        matches = await _find_products(session, product_name)
+        matches = await _find_products(session, shop_id, product_name)
         if not matches:
             return f"No product found matching '{product_name}'."
         if len(matches) > 1:

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
+from typing import Annotated
 
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolArg, tool
 from sqlalchemy import select
 
 from app.db.models import Bill, BillItem, Product, StockTxn
@@ -11,8 +12,12 @@ from app.tools.khata_tools import add_credit
 from app.tools.preference_tools import get_preference_value
 
 
-async def _get_draft_bill(session, bill_id: int) -> tuple[Bill | None, str | None]:
-    bill = await session.get(Bill, bill_id)
+async def _get_draft_bill(session, shop_id: str, bill_id: int) -> tuple[Bill | None, str | None]:
+    # Bill ids are a single global auto-increment sequence shared by every shop
+    # — always filter by shop_id too, or a shop could read/modify another
+    # shop's bill just by guessing/incrementing an id.
+    stmt = select(Bill).where(Bill.id == bill_id, Bill.shop_id == shop_id)
+    bill = (await session.execute(stmt)).scalar_one_or_none()
     if bill is None:
         return None, f"No bill found with id={bill_id}."
     if bill.status != "draft":
@@ -20,8 +25,8 @@ async def _get_draft_bill(session, bill_id: int) -> tuple[Bill | None, str | Non
     return bill, None
 
 
-async def _resolve_product(session, product_name: str) -> tuple[Product | None, str | None]:
-    matches = await _find_products(session, product_name)
+async def _resolve_product(session, shop_id: str, product_name: str) -> tuple[Product | None, str | None]:
+    matches = await _find_products(session, shop_id, product_name)
     if not matches:
         return None, f"No product found matching '{product_name}'."
     if len(matches) > 1:
@@ -30,6 +35,9 @@ async def _resolve_product(session, product_name: str) -> tuple[Product | None, 
 
 
 async def _get_bill_item(session, bill_id: int, product_id: int) -> BillItem | None:
+    # bill_id and product_id here always come from values already resolved
+    # through a shop_id-scoped lookup (_get_draft_bill / _resolve_product), so
+    # no separate shop_id filter is needed on this join table.
     stmt = select(BillItem).where(BillItem.bill_id == bill_id, BillItem.product_id == product_id)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
@@ -55,12 +63,12 @@ async def _recalculate_bill_totals(session, bill: Bill) -> None:
 
 
 @tool
-async def start_bill(customer_name: str | None = None) -> str:
+async def start_bill(shop_id: Annotated[str, InjectedToolArg], customer_name: str | None = None) -> str:
     """Start a new draft bill, optionally for a named customer. Returns the bill_id
     to use in subsequent add_item/edit_item/finalize_bill calls — remember it for
     the rest of this billing conversation."""
     async with async_session_maker() as session:
-        bill = Bill(customer_name=customer_name, status="draft")
+        bill = Bill(shop_id=shop_id, customer_name=customer_name, status="draft")
         session.add(bill)
         await session.commit()
         await session.refresh(bill)
@@ -69,7 +77,9 @@ async def start_bill(customer_name: str | None = None) -> str:
 
 
 @tool
-async def add_item(bill_id: int, product_name: str, quantity: float) -> str:
+async def add_item(
+    bill_id: int, product_name: str, quantity: float, shop_id: Annotated[str, InjectedToolArg]
+) -> str:
     """Add `quantity` MORE units of a product to a draft bill — use for phrases
     like "add 2 Maggi" or "also give me 3 sugar". If the product already has a
     line on this bill, `quantity` is ADDED on top of what's already there
@@ -82,10 +92,10 @@ async def add_item(bill_id: int, product_name: str, quantity: float) -> str:
     if quantity <= 0:
         return "quantity must be positive."
     async with async_session_maker() as session:
-        bill, err = await _get_draft_bill(session, bill_id)
+        bill, err = await _get_draft_bill(session, shop_id, bill_id)
         if err:
             return err
-        product, err = await _resolve_product(session, product_name)
+        product, err = await _resolve_product(session, shop_id, product_name)
         if err:
             return err
 
@@ -137,7 +147,9 @@ async def add_item(bill_id: int, product_name: str, quantity: float) -> str:
 
 
 @tool
-async def edit_item(bill_id: int, product_name: str, new_quantity: float) -> str:
+async def edit_item(
+    bill_id: int, product_name: str, new_quantity: float, shop_id: Annotated[str, InjectedToolArg]
+) -> str:
     """Set an existing bill line's quantity to an ABSOLUTE total — NOT cumulative,
     unlike add_item. Use this for "change the quantity of X to N", "make it N",
     or "remove X and add N instead" (all mean: the line should now read N, not
@@ -149,10 +161,10 @@ async def edit_item(bill_id: int, product_name: str, new_quantity: float) -> str
     if new_quantity < 0:
         return "new_quantity cannot be negative."
     async with async_session_maker() as session:
-        bill, err = await _get_draft_bill(session, bill_id)
+        bill, err = await _get_draft_bill(session, shop_id, bill_id)
         if err:
             return err
-        product, err = await _resolve_product(session, product_name)
+        product, err = await _resolve_product(session, shop_id, product_name)
         if err:
             return err
 
@@ -199,7 +211,12 @@ async def edit_item(bill_id: int, product_name: str, new_quantity: float) -> str
 
 
 @tool
-async def finalize_bill(bill_id: int, on_credit: bool = False, payment_method: str | None = None) -> str:
+async def finalize_bill(
+    bill_id: int,
+    shop_id: Annotated[str, InjectedToolArg],
+    on_credit: bool = False,
+    payment_method: str | None = None,
+) -> str:
     """Finalize a draft bill: locks it (status=finalized), decrements stock for
     every line item via a StockTxn (reason='sold'), and returns the final receipt
     totals. Rejects bills that are already finalized or have no items. If
@@ -220,7 +237,9 @@ async def finalize_bill(bill_id: int, on_credit: bool = False, payment_method: s
     # concurrent finalize_bill calls are expected, not at a SQLite file.
     async with async_session_maker() as session:
         bill = (
-            await session.execute(select(Bill).where(Bill.id == bill_id).with_for_update())
+            await session.execute(
+                select(Bill).where(Bill.id == bill_id, Bill.shop_id == shop_id).with_for_update()
+            )
         ).scalar_one_or_none()
         if bill is None:
             return f"No bill found with id={bill_id}."
@@ -244,7 +263,10 @@ async def finalize_bill(bill_id: int, on_credit: bool = False, payment_method: s
         # Lock every product row this bill touches, in a fixed ascending-id order.
         # A consistent lock order across all concurrent finalize_bill calls (even
         # ones for different bills) prevents lock-ordering deadlocks when two
-        # bills share products.
+        # bills share products. (No extra shop_id check needed here: every
+        # product_id on this bill was only ever attached via add_item's
+        # shop_id-scoped _resolve_product, so it's already guaranteed to belong
+        # to this shop.)
         product_ids = sorted({item.product_id for item in items})
         products = {}
         for product_id in product_ids:
@@ -286,7 +308,7 @@ async def finalize_bill(bill_id: int, on_credit: bool = False, payment_method: s
         # per-customer override via a "default_payment_method:<customer_name>"
         # preference key, checked before the global one.
         if payment_method is None:
-            payment_method = await get_preference_value(session, "default_payment_method")
+            payment_method = await get_preference_value(session, shop_id, "default_payment_method")
         bill.payment_method = payment_method
 
         if on_credit:
@@ -294,7 +316,9 @@ async def finalize_bill(bill_id: int, on_credit: bool = False, payment_method: s
             # only commit in the whole function, so a duplicate finalize_bill
             # call (blocked by the Bill row lock until this one commits) can
             # never see status=="draft" again and can never double-add to khata.
-            await add_credit(session, bill.customer_name, float(bill.grand_total), related_bill_id=bill.id)
+            await add_credit(
+                session, shop_id, bill.customer_name, float(bill.grand_total), related_bill_id=bill.id
+            )
 
         await session.commit()
         await session.refresh(bill)

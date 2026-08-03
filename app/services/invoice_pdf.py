@@ -26,14 +26,14 @@ def _placeholder(label: str, example: str) -> str:
     return f"[{label} not set — say \"{example}\" to set it]"
 
 
-async def _shop_header(session) -> tuple[str, str, str]:
+async def _shop_header(session, shop_id: str) -> tuple[str, str, str]:
     """Shop identity now lives in the Preference table (Phase 6) instead of the
     Phase 5 hardcoded placeholders. Falls back to a clearly-labeled prompt
     telling the owner how to set it, rather than crashing or inventing a
     plausible-looking fake shop name/GSTIN."""
-    name = await get_preference_value(session, "shop_name")
-    gstin = await get_preference_value(session, "gstin")
-    address = await get_preference_value(session, "shop_address")
+    name = await get_preference_value(session, shop_id, "shop_name")
+    gstin = await get_preference_value(session, shop_id, "gstin")
+    address = await get_preference_value(session, shop_id, "shop_address")
     return (
         name or _placeholder("Shop name", "my shop is called X"),
         gstin or _placeholder("GSTIN", "my shop's GSTIN is X"),
@@ -41,9 +41,13 @@ async def _shop_header(session) -> tuple[str, str, str]:
     )
 
 
-async def _load_bill(bill_id: int) -> tuple[Bill, list[BillItem], tuple[str, str, str]]:
+async def _load_bill(shop_id: str, bill_id: int) -> tuple[Bill, list[BillItem], tuple[str, str, str]]:
     async with async_session_maker() as session:
-        bill = await session.get(Bill, bill_id)
+        # Filter by shop_id too — bill ids are one global sequence shared by
+        # every shop, so without this a shop could generate an invoice for
+        # another shop's bill just by guessing/incrementing an id.
+        stmt = select(Bill).where(Bill.id == bill_id, Bill.shop_id == shop_id)
+        bill = (await session.execute(stmt)).scalar_one_or_none()
         if bill is None:
             raise ValueError(f"No bill found with id={bill_id}.")
         if bill.status != "finalized":
@@ -58,14 +62,14 @@ async def _load_bill(bill_id: int) -> tuple[Bill, list[BillItem], tuple[str, str
             .order_by(BillItem.id)
         )
         items = (await session.execute(stmt)).scalars().all()
-        shop_header = await _shop_header(session)
+        shop_header = await _shop_header(session, shop_id)
         return bill, list(items), shop_header
 
 
-async def generate_invoice_pdf(bill_id: int) -> str:
+async def generate_invoice_pdf(shop_id: str, bill_id: int) -> str:
     """Write a tax-invoice PDF for a finalized bill to a temp path and return
     that path. Raises ValueError for a missing or non-finalized bill."""
-    bill, items, (shop_name, shop_gstin, shop_address) = await _load_bill(bill_id)
+    bill, items, (shop_name, shop_gstin, shop_address) = await _load_bill(shop_id, bill_id)
 
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("InvoiceTitle", parent=styles["Title"], fontSize=18)

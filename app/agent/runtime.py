@@ -110,7 +110,7 @@ def _extract_text(content: str | list | dict) -> str:
     return str(content)
 
 
-async def _call_tool(name: str, args: dict) -> tuple[str, str | None]:
+async def _call_tool(name: str, args: dict, shop_id: str) -> tuple[str, str | None]:
     """Returns (text_for_model, file_path). Most tools just return a plain
     string, which passes straight through as text_for_model with file_path=None.
     Document-producing tools (get_invoice, get_sales_analysis) instead return a
@@ -120,12 +120,19 @@ async def _call_tool(name: str, args: dict) -> tuple[str, str | None]:
     context never contains a raw filesystem path, and the path never gets
     persisted into the Conversation history — it's a local temp file, meaningless
     after this turn/process). run_agent collects these into AgentReply.files,
-    which the webhook layer uses to call send_document."""
+    which the webhook layer uses to call send_document.
+
+    Every tool also takes `shop_id`, declared on the tool function as
+    Annotated[str, InjectedToolArg] — that annotation hides it from the schema
+    Gemini sees (bind_tools/tool_call_schema strip it out), so the model can
+    never supply, see, or spoof it. We inject the real value here, taken from
+    the caller's own thread_id (== the Telegram chat_id that sent this
+    message), which is the multi-tenant isolation boundary for every tool."""
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
         return f"Unknown tool: {name}", None
     try:
-        result = await tool.ainvoke(args)
+        result = await tool.ainvoke({**args, "shop_id": shop_id})
     except Exception as exc:  # noqa: BLE001 - surface the failure back to the model
         return f"Tool '{name}' raised an error: {exc}", None
 
@@ -135,6 +142,10 @@ async def _call_tool(name: str, args: dict) -> tuple[str, str | None]:
 
 
 async def run_agent(message: str, thread_id: str = "default") -> AgentReply:
+    # thread_id doubles as shop_id: one Telegram chat == one shop's conversation
+    # AND one shop's tenant key for every DB-backed tool. See app/db/models.py's
+    # module docstring for the full rationale.
+    shop_id = thread_id
     history = await _load_history(thread_id)
     messages: list[BaseMessage] = [SystemMessage(content=SYSTEM_PROMPT), *history, HumanMessage(content=message)]
 
@@ -149,7 +160,7 @@ async def run_agent(message: str, thread_id: str = "default") -> AgentReply:
             break
 
         for call in tool_calls:
-            text_result, file_path = await _call_tool(call["name"], call["args"])
+            text_result, file_path = await _call_tool(call["name"], call["args"], shop_id)
             messages.append(ToolMessage(content=text_result, tool_call_id=call["id"]))
             if file_path:
                 collected_files.append(file_path)

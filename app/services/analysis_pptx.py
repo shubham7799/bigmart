@@ -43,11 +43,12 @@ def _parse_range(date_from: str, date_to: str) -> tuple[datetime, datetime]:
     return start, end
 
 
-async def _aggregate(date_from: str, date_to: str) -> AnalysisData:
+async def _aggregate(shop_id: str, date_from: str, date_to: str) -> AnalysisData:
     start, end = _parse_range(date_from, date_to)
 
     async with async_session_maker() as session:
         bills_stmt = select(Bill).where(
+            Bill.shop_id == shop_id,
             Bill.status == "finalized",
             Bill.finalized_at >= start,
             Bill.finalized_at <= end,
@@ -73,6 +74,7 @@ async def _aggregate(date_from: str, date_to: str) -> AnalysisData:
 
         stock_stmt = (
             select(Product.name, Product.quantity_on_hand)
+            .where(Product.shop_id == shop_id)
             .order_by(Product.quantity_on_hand.desc())
             .limit(10)
         )
@@ -139,11 +141,11 @@ def _add_chart_slide(prs: Presentation, title: str, png_path: str) -> None:
     slide.shapes.add_picture(png_path, Inches(0.6), Inches(1.5), width=Inches(8.8))
 
 
-async def generate_analysis_pptx(date_from: str, date_to: str) -> str:
+async def generate_analysis_pptx(shop_id: str, date_from: str, date_to: str) -> str:
     """Build a sales/stock/GST analysis deck for [date_from, date_to] (inclusive,
     both "YYYY-MM-DD") and return the path to the generated .pptx file. Raises
     ValueError for a malformed or inverted date range."""
-    data = await _aggregate(date_from, date_to)
+    data = await _aggregate(shop_id, date_from, date_to)
 
     prs = Presentation()
     _add_summary_slide(prs, data)

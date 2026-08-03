@@ -1,4 +1,6 @@
-from langchain_core.tools import tool
+from typing import Annotated
+
+from langchain_core.tools import InjectedToolArg, tool
 
 from app.services.analysis_pptx import generate_analysis_pptx
 from app.services.invoice_pdf import generate_invoice_pdf
@@ -13,25 +15,27 @@ from app.services.invoice_pdf import generate_invoice_pdf
 
 
 @tool
-async def get_invoice(bill_id: int) -> dict:
+async def get_invoice(bill_id: int, shop_id: Annotated[str, InjectedToolArg]) -> dict:
     """Generate a PDF tax invoice for a finalized bill and send it to the user.
     Only works on finalized bills — returns an error message (no file sent) for
     a draft bill or an unknown bill_id."""
     try:
-        path = await generate_invoice_pdf(bill_id)
+        path = await generate_invoice_pdf(shop_id, bill_id)
     except ValueError as exc:
         return {"text": str(exc)}
     return {"text": f"Generated the invoice PDF for bill {bill_id}.", "file_path": path}
 
 
 @tool
-async def get_sales_analysis(date_from: str, date_to: str) -> dict:
+async def get_sales_analysis(
+    date_from: str, date_to: str, shop_id: Annotated[str, InjectedToolArg]
+) -> dict:
     """Generate a sales/stock/GST analysis slide deck (PPTX) covering
     [date_from, date_to] inclusive (both "YYYY-MM-DD") and send it to the user.
     Returns an error message (no file sent) for a malformed or inverted date
     range (date_from after date_to)."""
     try:
-        path = await generate_analysis_pptx(date_from, date_to)
+        path = await generate_analysis_pptx(shop_id, date_from, date_to)
     except ValueError as exc:
         return {"text": str(exc)}
     return {

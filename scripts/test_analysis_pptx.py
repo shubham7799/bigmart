@@ -1,6 +1,6 @@
 """Standalone test for app/services/analysis_pptx.py — no agent, no Telegram.
 
-Run: python scripts/test_analysis_pptx.py <date_from> <date_to>
+Run: python scripts/test_analysis_pptx.py <shop_id> <date_from> <date_to>
 """
 
 import asyncio
@@ -11,8 +11,8 @@ from pptx import Presentation
 from app.services.analysis_pptx import _aggregate, generate_analysis_pptx
 
 
-async def main(date_from: str, date_to: str) -> None:
-    data = await _aggregate(date_from, date_to)
+async def main(shop_id: str, date_from: str, date_to: str) -> None:
+    data = await _aggregate(shop_id, date_from, date_to)
     print("--- aggregated data ---")
     print("bill_count:", data.bill_count)
     print("total_sales:", data.total_sales)
@@ -20,7 +20,7 @@ async def main(date_from: str, date_to: str) -> None:
     print("top_products:", data.top_products)
     print("stock_levels:", data.stock_levels)
 
-    path = await generate_analysis_pptx(date_from, date_to)
+    path = await generate_analysis_pptx(shop_id, date_from, date_to)
     print(f"\nPPTX written to: {path}")
 
     prs = Presentation(path)
@@ -46,14 +46,15 @@ async def main(date_from: str, date_to: str) -> None:
 
     # inverted range should be rejected
     try:
-        await generate_analysis_pptx(date_to, date_from) if date_from != date_to else (_ for _ in ()).throw(
-            ValueError("skip: from==to, can't test inversion")
-        )
+        await generate_analysis_pptx(shop_id, date_to, date_from) if date_from != date_to else (
+            _ for _ in ()
+        ).throw(ValueError("skip: from==to, can't test inversion"))
     except ValueError as exc:
         print(f"OK: inverted date range correctly rejected: {exc}")
 
 
 if __name__ == "__main__":
-    date_from = sys.argv[1] if len(sys.argv) > 1 else "2026-07-25"
-    date_to = sys.argv[2] if len(sys.argv) > 2 else "2026-08-01"
-    asyncio.run(main(date_from, date_to))
+    shop_id = sys.argv[1] if len(sys.argv) > 1 else "legacy"
+    date_from = sys.argv[2] if len(sys.argv) > 2 else "2026-07-25"
+    date_to = sys.argv[3] if len(sys.argv) > 3 else "2026-08-01"
+    asyncio.run(main(shop_id, date_from, date_to))
